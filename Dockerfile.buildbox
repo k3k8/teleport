@@ -19,6 +19,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     git \
     make \
+    gcc \
+    g++ \
     pkg-config \
     libpam-dev \
     && rm -rf /var/lib/apt/lists/*
