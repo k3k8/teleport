@@ -1,0 +1,377 @@
+name: Build AGPL Binaries
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'バージョンタグ (例: v17.0.0)'
+        required: true
+
+permissions:
+  contents: write  # Releases へのアップロードに必要
+  pages: write
+  id-token: write
+
+# ─────────────────────────────────────────────
+# バージョン抽出 (全ジョブで共有)
+# ─────────────────────────────────────────────
+jobs:
+  get-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - id: v
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
+          fi
+
+# ─────────────────────────────────────────────
+# Web UI ビルド (ubuntu-latest で一度だけ)
+# 成果物の webassets を各バイナリビルドジョブで再利用する
+# ─────────────────────────────────────────────
+  build-ui:
+    needs: get-version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-toolchain.toml (channel = "1.94.0") が自動的に反映される
+      - name: Setup Rust
+        run: |
+          rustup show active-toolchain
+          rustup target add wasm32-unknown-unknown
+
+      # wasm-bindgen-cli と wasm-opt は make build-ui 内で cargo install される
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: '10.32.1'
+
+      - name: Install JS dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Web UI
+        run: make build-ui
+
+      - name: Upload webassets
+        uses: actions/upload-artifact@v4
+        with:
+          name: webassets
+          path: webassets/
+          retention-days: 1
+
+# ─────────────────────────────────────────────
+# Linux amd64
+# PAM + BPF + Rust (RDP decoder / fdpass-teleport)
+# ─────────────────────────────────────────────
+  build-linux-amd64:
+    needs: [get-version, build-ui]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.get-version.outputs.version }}
+      GOOS: linux
+      GOARCH: amd64
+      CGO_ENABLED: 1
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Setup Rust
+        run: |
+          rustup show active-toolchain
+          rustup target add x86_64-unknown-linux-gnu
+
+      - name: Install system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libpam-dev libbpf-dev
+
+      - name: Download webassets
+        uses: actions/download-artifact@v4
+        with:
+          name: webassets
+          path: webassets/
+
+      - name: Build binaries
+        run: |
+          LDFLAGS="-X github.com/gravitational/teleport/lib/modules.teleportBuildType=oss"
+          TAGS="webassets_embed pam bpf desktop_access_rdp rust_rdp_decoder kustomize_no_dynamic_plugin"
+
+          # teleport サーバー/エージェント (Web UI 埋め込み + PAM + BPF + Windows デスクトップ)
+          go build -tags "$TAGS" -ldflags "$LDFLAGS" -o build/teleport ./tool/teleport
+
+          # tsh クライアント (BPF 不要、RDP デコーダーあり)
+          go build -tags "desktop_access_rdp rust_rdp_decoder kustomize_no_dynamic_plugin" \
+            -ldflags "$LDFLAGS" -o build/tsh ./tool/tsh
+
+          # tctl / tbot / teleport-update
+          go build -tags "kustomize_no_dynamic_plugin" -ldflags "$LDFLAGS" -o build/tctl ./tool/tctl
+          go build -tags "kustomize_no_dynamic_plugin" -ldflags "$LDFLAGS" -o build/tbot ./tool/tbot
+          go build -ldflags "$LDFLAGS" -o build/teleport-update ./tool/teleport-update
+
+          # fdpass-teleport (tbot SSH multiplexer 用 Rust バイナリ)
+          cd tool/fdpass-teleport
+          cargo build --release --locked --target x86_64-unknown-linux-gnu
+          cp target/x86_64-unknown-linux-gnu/release/fdpass-teleport ../../build/
+
+      - name: Package tarball
+        run: |
+          TARBALL="teleport-${VERSION}-linux-amd64-bin.tar.gz"
+          mkdir -p dist/teleport
+          cp build/teleport build/tsh build/tctl build/tbot build/teleport-update build/fdpass-teleport dist/teleport/
+          echo "${VERSION}" > dist/teleport/VERSION
+          cd dist && tar czf "../${TARBALL}" teleport/
+          mkdir -p pages && mv "../${TARBALL}" pages/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-amd64
+          path: pages/
+
+# ─────────────────────────────────────────────
+# Linux arm64 (ネイティブ arm64 ランナー)
+# ─────────────────────────────────────────────
+  build-linux-arm64:
+    needs: [get-version, build-ui]
+    runs-on: ubuntu-24.04-arm
+    env:
+      VERSION: ${{ needs.get-version.outputs.version }}
+      GOOS: linux
+      GOARCH: arm64
+      CGO_ENABLED: 1
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Setup Rust
+        run: |
+          rustup show active-toolchain
+          rustup target add aarch64-unknown-linux-gnu
+
+      - name: Install system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libpam-dev libbpf-dev
+
+      - name: Download webassets
+        uses: actions/download-artifact@v4
+        with:
+          name: webassets
+          path: webassets/
+
+      - name: Build binaries
+        run: |
+          LDFLAGS="-X github.com/gravitational/teleport/lib/modules.teleportBuildType=oss"
+
+          go build -tags "webassets_embed pam bpf desktop_access_rdp rust_rdp_decoder kustomize_no_dynamic_plugin" \
+            -ldflags "$LDFLAGS" -o build/teleport ./tool/teleport
+          go build -tags "desktop_access_rdp rust_rdp_decoder kustomize_no_dynamic_plugin" \
+            -ldflags "$LDFLAGS" -o build/tsh ./tool/tsh
+          go build -tags "kustomize_no_dynamic_plugin" -ldflags "$LDFLAGS" -o build/tctl ./tool/tctl
+          go build -tags "kustomize_no_dynamic_plugin" -ldflags "$LDFLAGS" -o build/tbot ./tool/tbot
+          go build -ldflags "$LDFLAGS" -o build/teleport-update ./tool/teleport-update
+
+          cd tool/fdpass-teleport
+          cargo build --release --locked --target aarch64-unknown-linux-gnu
+          cp target/aarch64-unknown-linux-gnu/release/fdpass-teleport ../../build/
+
+      - name: Package tarball
+        run: |
+          TARBALL="teleport-${VERSION}-linux-arm64-bin.tar.gz"
+          mkdir -p dist/teleport
+          cp build/teleport build/tsh build/tctl build/tbot build/teleport-update build/fdpass-teleport dist/teleport/
+          echo "${VERSION}" > dist/teleport/VERSION
+          cd dist && tar czf "../${TARBALL}" teleport/
+          mkdir -p pages && mv "../${TARBALL}" pages/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-arm64
+          path: pages/
+
+# ─────────────────────────────────────────────
+# macOS darwin-universal (arm64 + amd64 → lipo)
+# macos-latest は Apple Silicon (arm64) ランナー
+# ─────────────────────────────────────────────
+  build-macos:
+    needs: [get-version, build-ui]
+    runs-on: macos-latest
+    env:
+      VERSION: ${{ needs.get-version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Setup Rust
+        run: |
+          rustup show active-toolchain
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Download webassets
+        uses: actions/download-artifact@v4
+        with:
+          name: webassets
+          path: webassets/
+
+      - name: Build arm64 binaries
+        env:
+          GOOS: darwin
+          GOARCH: arm64
+          CGO_ENABLED: 1
+        run: |
+          LDFLAGS="-X github.com/gravitational/teleport/lib/modules.teleportBuildType=oss"
+
+          go build -tags "webassets_embed desktop_access_rdp rust_rdp_decoder kustomize_no_dynamic_plugin" \
+            -ldflags "$LDFLAGS" -o build/arm64/teleport ./tool/teleport
+          go build -tags "desktop_access_rdp rust_rdp_decoder kustomize_no_dynamic_plugin" \
+            -ldflags "$LDFLAGS" -o build/arm64/tsh ./tool/tsh
+          go build -tags "kustomize_no_dynamic_plugin" -ldflags "$LDFLAGS" -o build/arm64/tctl ./tool/tctl
+          go build -tags "kustomize_no_dynamic_plugin" -ldflags "$LDFLAGS" -o build/arm64/tbot ./tool/tbot
+
+          cd tool/fdpass-teleport
+          cargo build --release --locked --target aarch64-apple-darwin
+          cp target/aarch64-apple-darwin/release/fdpass-teleport ../../build/arm64/
+
+      - name: Build amd64 binaries (cross-compile)
+        env:
+          GOOS: darwin
+          GOARCH: amd64
+          CGO_ENABLED: 1
+          # clang はマルチターゲットなので -target フラグで amd64 向けにクロスコンパイル可能
+          CC: clang -target x86_64-apple-macos10.15
+        run: |
+          LDFLAGS="-X github.com/gravitational/teleport/lib/modules.teleportBuildType=oss"
+
+          go build -tags "webassets_embed desktop_access_rdp rust_rdp_decoder kustomize_no_dynamic_plugin" \
+            -ldflags "$LDFLAGS" -o build/amd64/teleport ./tool/teleport
+          go build -tags "desktop_access_rdp rust_rdp_decoder kustomize_no_dynamic_plugin" \
+            -ldflags "$LDFLAGS" -o build/amd64/tsh ./tool/tsh
+          go build -tags "kustomize_no_dynamic_plugin" -ldflags "$LDFLAGS" -o build/amd64/tctl ./tool/tctl
+          go build -tags "kustomize_no_dynamic_plugin" -ldflags "$LDFLAGS" -o build/amd64/tbot ./tool/tbot
+
+          cd tool/fdpass-teleport
+          cargo build --release --locked --target x86_64-apple-darwin
+          cp target/x86_64-apple-darwin/release/fdpass-teleport ../../build/amd64/
+
+      - name: Create universal binaries with lipo
+        run: |
+          mkdir -p build/universal
+          for bin in teleport tsh tctl tbot fdpass-teleport; do
+            lipo -create build/arm64/$bin build/amd64/$bin -output build/universal/$bin
+          done
+
+      - name: Package tarball
+        run: |
+          TARBALL="teleport-${VERSION}-darwin-universal-bin.tar.gz"
+          mkdir -p dist/teleport
+          cp build/universal/* dist/teleport/
+          echo "${VERSION}" > dist/teleport/VERSION
+          cd dist && tar czf "../${TARBALL}" teleport/
+          mkdir -p pages && mv "../${TARBALL}" pages/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: darwin-universal
+          path: pages/
+
+# ─────────────────────────────────────────────
+# Windows amd64 (tsh.exe + tctl.exe + tbot.exe)
+# install.sh フローとは無関係なので GitHub Releases へアップロード
+# ─────────────────────────────────────────────
+  build-windows:
+    needs: get-version
+    runs-on: windows-latest
+    env:
+      VERSION: ${{ needs.get-version.outputs.version }}
+      GOOS: windows
+      GOARCH: amd64
+      CGO_ENABLED: 0
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build binaries
+        shell: bash
+        run: |
+          LDFLAGS="-X github.com/gravitational/teleport/lib/modules.teleportBuildType=oss"
+          go build -tags "kustomize_no_dynamic_plugin" -ldflags "$LDFLAGS" -o build/tsh.exe  ./tool/tsh
+          go build -tags "kustomize_no_dynamic_plugin" -ldflags "$LDFLAGS" -o build/tctl.exe ./tool/tctl
+          go build -tags "kustomize_no_dynamic_plugin" -ldflags "$LDFLAGS" -o build/tbot.exe ./tool/tbot
+
+      - name: Package zip
+        shell: bash
+        run: |
+          ZIPNAME="teleport-${VERSION}-windows-amd64.zip"
+          mkdir -p dist/teleport
+          cp build/tsh.exe build/tctl.exe build/tbot.exe dist/teleport/
+          echo "${VERSION}" > dist/teleport/VERSION
+          cd dist && powershell Compress-Archive -Path teleport -DestinationPath "../${ZIPNAME}"
+          mv "${ZIPNAME}" ../
+
+      - name: Upload zip to GitHub Releases
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ZIPNAME="teleport-${VERSION}-windows-amd64.zip"
+          # リリースがなければ作成、あればアセットだけ追加
+          gh release create "${VERSION}" --title "${VERSION}" --notes "" 2>/dev/null || true
+          gh release upload "${VERSION}" "${ZIPNAME}" --clobber
+
+# ─────────────────────────────────────────────
+# GitHub Pages へデプロイ (Linux / macOS CDN 用)
+# URL 例: https://k3k8.github.io/teleport/teleport-v17.x.x-linux-amd64-bin.tar.gz
+# TELEPORT_CDN_BASE_URL にこの URL のベース部分を設定する
+# ─────────────────────────────────────────────
+  deploy:
+    needs: [build-linux-amd64, build-linux-arm64, build-macos]
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    permissions:
+      pages: write
+      id-token: write
+    steps:
+      - name: Download CDN artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: pages/
+          merge-multiple: true
+
+      - name: Upload to Pages
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: pages/
+
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4
