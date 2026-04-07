@@ -69,6 +69,7 @@ jobs:
       GOOS: linux
       GOARCH: amd64
       CGO_ENABLED: 1
+      GOFLAGS: -buildvcs=false
     steps:
       - uses: actions/checkout@v4
 
@@ -119,6 +120,7 @@ jobs:
       GOOS: linux
       GOARCH: arm64
       CGO_ENABLED: 1
+      GOFLAGS: -buildvcs=false
     steps:
       - uses: actions/checkout@v4
 
@@ -332,6 +334,7 @@ jobs:
       GOOS: linux
       GOARCH: amd64
       CGO_ENABLED: 1
+      GOFLAGS: -buildvcs=false
     steps:
       - uses: actions/checkout@v4
 
@@ -372,6 +375,7 @@ jobs:
       GOOS: linux
       GOARCH: arm64
       CGO_ENABLED: 1
+      GOFLAGS: -buildvcs=false
     steps:
       - uses: actions/checkout@v4
 
