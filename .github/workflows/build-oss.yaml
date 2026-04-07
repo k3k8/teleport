@@ -1,4 +1,4 @@
-name: Build AGPL Binaries
+name: Build OSS Binaries
 
 on:
   push:
@@ -14,6 +14,7 @@ permissions:
   contents: write  # Releases へのアップロードに必要
   pages: write
   id-token: write
+  packages: write  # ghcr.io へのプッシュに必要
 
 # ─────────────────────────────────────────────
 # バージョン抽出 (全ジョブで共有)
@@ -33,30 +34,15 @@ jobs:
           fi
 
 # ─────────────────────────────────────────────
-# Web UI ビルド (ubuntu-latest で一度だけ)
-# 成果物の webassets を各バイナリビルドジョブで再利用する
+# Web UI ビルド (buildbox コンテナ内で実行)
+# 全プラットフォームのバイナリが webassets artifact を使い回す
 # ─────────────────────────────────────────────
   build-ui:
     needs: get-version
     runs-on: ubuntu-latest
+    container: ghcr.io/k3k8/teleport-buildbox:latest
     steps:
       - uses: actions/checkout@v4
-
-      # rust-toolchain.toml (channel = "1.94.0") が自動的に反映される
-      - name: Setup Rust
-        run: |
-          rustup show active-toolchain
-          rustup target add wasm32-unknown-unknown
-
-      # wasm-bindgen-cli と wasm-opt は make build-ui 内で cargo install される
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '24'
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-        # バージョンは package.json の packageManager フィールドから自動取得
 
       - name: Install JS dependencies
         run: pnpm install --frozen-lockfile
@@ -72,12 +58,12 @@ jobs:
           retention-days: 1
 
 # ─────────────────────────────────────────────
-# Linux amd64
-# PAM + BPF + Rust (RDP decoder / fdpass-teleport)
+# Linux amd64 (buildbox コンテナ)
 # ─────────────────────────────────────────────
   build-linux-amd64:
     needs: [get-version, build-ui]
     runs-on: ubuntu-latest
+    container: ghcr.io/k3k8/teleport-buildbox:latest
     env:
       VERSION: ${{ needs.get-version.outputs.version }}
       GOOS: linux
@@ -85,21 +71,6 @@ jobs:
       CGO_ENABLED: 1
     steps:
       - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      - name: Setup Rust
-        run: |
-          rustup show active-toolchain
-          rustup target add x86_64-unknown-linux-gnu
-
-      - name: Install system libraries
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libpam-dev libbpf-dev
 
       - name: Download webassets
         uses: actions/download-artifact@v4
@@ -110,21 +81,14 @@ jobs:
       - name: Build binaries
         run: |
           LDFLAGS="-X github.com/gravitational/teleport/lib/modules.teleportBuildType=oss"
-          TAGS="webassets_embed pam bpf kustomize_no_dynamic_plugin"
 
-          # teleport サーバー/エージェント (Web UI 埋め込み + PAM + BPF)
-          go build -tags "$TAGS" -ldflags "$LDFLAGS" -o build/teleport ./tool/teleport
-
-          # tsh クライアント
-          go build -tags "kustomize_no_dynamic_plugin" \
-            -ldflags "$LDFLAGS" -o build/tsh ./tool/tsh
-
-          # tctl / tbot / teleport-update
+          go build -tags "webassets_embed pam kustomize_no_dynamic_plugin" \
+            -ldflags "$LDFLAGS" -o build/teleport ./tool/teleport
+          go build -tags "kustomize_no_dynamic_plugin" -ldflags "$LDFLAGS" -o build/tsh ./tool/tsh
           go build -tags "kustomize_no_dynamic_plugin" -ldflags "$LDFLAGS" -o build/tctl ./tool/tctl
           go build -tags "kustomize_no_dynamic_plugin" -ldflags "$LDFLAGS" -o build/tbot ./tool/tbot
           go build -ldflags "$LDFLAGS" -o build/teleport-update ./tool/teleport-update
 
-          # fdpass-teleport (tbot SSH multiplexer 用 Rust バイナリ)
           cd tool/fdpass-teleport
           cargo build --release --locked --target x86_64-unknown-linux-gnu
           cp target/x86_64-unknown-linux-gnu/release/fdpass-teleport ../../build/
@@ -144,11 +108,12 @@ jobs:
           path: pages/
 
 # ─────────────────────────────────────────────
-# Linux arm64 (ネイティブ arm64 ランナー)
+# Linux arm64 (buildbox コンテナ、ネイティブ arm64 ランナー)
 # ─────────────────────────────────────────────
   build-linux-arm64:
     needs: [get-version, build-ui]
     runs-on: ubuntu-24.04-arm
+    container: ghcr.io/k3k8/teleport-buildbox:latest
     env:
       VERSION: ${{ needs.get-version.outputs.version }}
       GOOS: linux
@@ -156,21 +121,6 @@ jobs:
       CGO_ENABLED: 1
     steps:
       - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      - name: Setup Rust
-        run: |
-          rustup show active-toolchain
-          rustup target add aarch64-unknown-linux-gnu
-
-      - name: Install system libraries
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libpam-dev libbpf-dev
 
       - name: Download webassets
         uses: actions/download-artifact@v4
@@ -182,10 +132,9 @@ jobs:
         run: |
           LDFLAGS="-X github.com/gravitational/teleport/lib/modules.teleportBuildType=oss"
 
-          go build -tags "webassets_embed pam bpf kustomize_no_dynamic_plugin" \
+          go build -tags "webassets_embed pam kustomize_no_dynamic_plugin" \
             -ldflags "$LDFLAGS" -o build/teleport ./tool/teleport
-          go build -tags "kustomize_no_dynamic_plugin" \
-            -ldflags "$LDFLAGS" -o build/tsh ./tool/tsh
+          go build -tags "kustomize_no_dynamic_plugin" -ldflags "$LDFLAGS" -o build/tsh ./tool/tsh
           go build -tags "kustomize_no_dynamic_plugin" -ldflags "$LDFLAGS" -o build/tctl ./tool/tctl
           go build -tags "kustomize_no_dynamic_plugin" -ldflags "$LDFLAGS" -o build/tbot ./tool/tbot
           go build -ldflags "$LDFLAGS" -o build/teleport-update ./tool/teleport-update
@@ -210,7 +159,7 @@ jobs:
 
 # ─────────────────────────────────────────────
 # macOS darwin-universal (arm64 + amd64 → lipo)
-# macos-latest は Apple Silicon (arm64) ランナー
+# webassets は build-ui の artifact を再利用
 # ─────────────────────────────────────────────
   build-macos:
     needs: [get-version, build-ui]
@@ -260,7 +209,6 @@ jobs:
           GOOS: darwin
           GOARCH: amd64
           CGO_ENABLED: 1
-          # clang はマルチターゲットなので -target フラグで amd64 向けにクロスコンパイル可能
           CC: clang -target x86_64-apple-macos10.15
         run: |
           LDFLAGS="-X github.com/gravitational/teleport/lib/modules.teleportBuildType=oss"
@@ -299,7 +247,7 @@ jobs:
 
 # ─────────────────────────────────────────────
 # Windows amd64 (tsh.exe + tctl.exe + tbot.exe)
-# install.sh フローとは無関係なので GitHub Releases へアップロード
+# MinGW は windows-latest に含まれる gcc を使用
 # ─────────────────────────────────────────────
   build-windows:
     needs: get-version
@@ -333,7 +281,6 @@ jobs:
           cp build/tsh.exe build/tctl.exe build/tbot.exe dist/teleport/
           echo "${VERSION}" > dist/teleport/VERSION
           cd dist && powershell Compress-Archive -Path teleport -DestinationPath "../${ZIPNAME}"
-          mv "${ZIPNAME}" ../
 
       - name: Upload zip to GitHub Releases
         shell: bash
@@ -341,14 +288,11 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           ZIPNAME="teleport-${VERSION}-windows-amd64.zip"
-          # リリースがなければ作成、あればアセットだけ追加
           gh release create "${VERSION}" --title "${VERSION}" --notes "" 2>/dev/null || true
           gh release upload "${VERSION}" "${ZIPNAME}" --clobber
 
 # ─────────────────────────────────────────────
 # GitHub Pages へデプロイ (Linux / macOS CDN 用)
-# URL 例: https://k3k8.github.io/teleport/teleport-v17.x.x-linux-amd64-bin.tar.gz
-# TELEPORT_CDN_BASE_URL にこの URL のベース部分を設定する
 # ─────────────────────────────────────────────
   deploy:
     needs: [build-linux-amd64, build-linux-arm64, build-macos]
@@ -374,3 +318,108 @@ jobs:
       - name: Deploy
         id: deployment
         uses: actions/deploy-pages@v4
+
+# ─────────────────────────────────────────────
+# Docker イメージビルド (Helm chart 用, buildbox コンテナ内)
+# ghcr.io/k3k8/teleport:VERSION として公開
+# ─────────────────────────────────────────────
+  build-docker-amd64:
+    needs: [get-version, build-ui]
+    runs-on: ubuntu-latest
+    container: ghcr.io/k3k8/teleport-buildbox:latest
+    env:
+      VERSION: ${{ needs.get-version.outputs.version }}
+      GOOS: linux
+      GOARCH: amd64
+      CGO_ENABLED: 1
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download webassets
+        uses: actions/download-artifact@v4
+        with:
+          name: webassets
+          path: webassets/
+
+      - name: Build teleport binary
+        run: |
+          go build -tags "webassets_embed pam kustomize_no_dynamic_plugin" \
+            -ldflags "-X github.com/gravitational/teleport/lib/modules.teleportBuildType=oss" \
+            -o docker-build/teleport ./tool/teleport
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push amd64 image
+        uses: docker/build-push-action@v6
+        with:
+          context: docker-build/
+          file: Dockerfile.oss
+          platforms: linux/amd64
+          push: true
+          tags: ghcr.io/k3k8/teleport:${{ env.VERSION }}-amd64
+
+  build-docker-arm64:
+    needs: [get-version, build-ui]
+    runs-on: ubuntu-24.04-arm
+    container: ghcr.io/k3k8/teleport-buildbox:latest
+    env:
+      VERSION: ${{ needs.get-version.outputs.version }}
+      GOOS: linux
+      GOARCH: arm64
+      CGO_ENABLED: 1
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download webassets
+        uses: actions/download-artifact@v4
+        with:
+          name: webassets
+          path: webassets/
+
+      - name: Build teleport binary
+        run: |
+          go build -tags "webassets_embed pam kustomize_no_dynamic_plugin" \
+            -ldflags "-X github.com/gravitational/teleport/lib/modules.teleportBuildType=oss" \
+            -o docker-build/teleport ./tool/teleport
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push arm64 image
+        uses: docker/build-push-action@v6
+        with:
+          context: docker-build/
+          file: Dockerfile.oss
+          platforms: linux/arm64
+          push: true
+          tags: ghcr.io/k3k8/teleport:${{ env.VERSION }}-arm64
+
+  push-docker-manifest:
+    needs: [get-version, build-docker-amd64, build-docker-arm64]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.get-version.outputs.version }}
+    steps:
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create and push multi-arch manifest
+        run: |
+          docker buildx imagetools create \
+            -t ghcr.io/k3k8/teleport:${VERSION} \
+            -t ghcr.io/k3k8/teleport:latest \
+            ghcr.io/k3k8/teleport:${VERSION}-amd64 \
+            ghcr.io/k3k8/teleport:${VERSION}-arm64

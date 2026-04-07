@@ -1,0 +1,52 @@
+# syntax=docker/dockerfile:1
+# Teleport OSS buildbox
+# Pre-installs all heavy build dependencies to speed up CI.
+# Versions are passed as build-args from build.assets/versions.mk via the workflow.
+# Rebuild when Dockerfile.buildbox changes or when versions.mk is updated.
+
+FROM ubuntu:24.04
+
+ARG GOLANG_VERSION
+ARG RUST_VERSION
+ARG NODE_VERSION
+ARG WASM_BINDGEN_VERSION
+ARG WASM_OPT_VERSION
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    git \
+    make \
+    pkg-config \
+    libpam-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Go
+RUN ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') && \
+    curl -fsSL https://go.dev/dl/go${GOLANG_VERSION}.linux-${ARCH}.tar.gz | \
+    tar -C /usr/local -xz
+ENV PATH=/usr/local/go/bin:${PATH}
+
+# Rust + targets
+ENV RUSTUP_HOME=/opt/rust \
+    CARGO_HOME=/opt/rust
+RUN curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs | \
+    sh -s -- -y --profile minimal --default-toolchain ${RUST_VERSION} && \
+    /opt/rust/bin/rustup target add \
+        wasm32-unknown-unknown \
+        x86_64-unknown-linux-gnu \
+        aarch64-unknown-linux-gnu
+ENV PATH=/opt/rust/bin:${PATH}
+
+# wasm-bindgen-cli + wasm-opt
+# These are slow to cargo install — bake them in so CI doesn't pay this cost each run.
+RUN cargo install --locked wasm-bindgen-cli --version ${WASM_BINDGEN_VERSION} && \
+    cargo install --locked "wasm-opt@${WASM_OPT_VERSION}"
+
+# Node.js + pnpm
+RUN ARCH=$(uname -m | sed 's/x86_64/x64/;s/aarch64/arm64/') && \
+    curl -fsSL https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${ARCH}.tar.gz | \
+    tar -C /usr/local -xz --strip-components=1
+RUN corepack enable pnpm
