@@ -56,8 +56,7 @@ jobs:
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
-        with:
-          version: '10.32.1'
+        # バージョンは package.json の packageManager フィールドから自動取得
 
       - name: Install JS dependencies
         run: pnpm install --frozen-lockfile
