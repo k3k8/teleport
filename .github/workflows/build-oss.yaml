@@ -326,29 +326,24 @@ jobs:
 # ghcr.io/k3k8/teleport:VERSION として公開
 # ─────────────────────────────────────────────
   build-docker-amd64:
-    needs: [get-version, build-ui]
+    needs: [get-version, build-linux-amd64]
     runs-on: ubuntu-latest
-    container: ghcr.io/k3k8/teleport-buildbox:latest
     env:
       VERSION: ${{ needs.get-version.outputs.version }}
-      GOOS: linux
-      GOARCH: amd64
-      CGO_ENABLED: 1
-      GOFLAGS: -buildvcs=false
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download webassets
+      - name: Download linux-amd64 artifact
         uses: actions/download-artifact@v4
         with:
-          name: webassets
-          path: webassets/
+          name: linux-amd64
+          path: dist/
 
-      - name: Build teleport binary
+      - name: Extract teleport binary
         run: |
-          go build -tags "webassets_embed pam kustomize_no_dynamic_plugin" \
-            -ldflags "-X github.com/gravitational/teleport/lib/modules.teleportBuildType=oss" \
-            -o docker-build/teleport ./tool/teleport
+          mkdir -p docker-build
+          tar -xzf dist/teleport-${VERSION}-linux-amd64-bin.tar.gz -C dist/
+          cp dist/teleport/teleport docker-build/
 
       - name: Login to GHCR
         uses: docker/login-action@v3
@@ -367,29 +362,24 @@ jobs:
           tags: ghcr.io/k3k8/teleport:${{ env.VERSION }}-amd64
 
   build-docker-arm64:
-    needs: [get-version, build-ui]
-    runs-on: ubuntu-24.04-arm
-    container: ghcr.io/k3k8/teleport-buildbox:latest
+    needs: [get-version, build-linux-arm64]
+    runs-on: ubuntu-latest
     env:
       VERSION: ${{ needs.get-version.outputs.version }}
-      GOOS: linux
-      GOARCH: arm64
-      CGO_ENABLED: 1
-      GOFLAGS: -buildvcs=false
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download webassets
+      - name: Download linux-arm64 artifact
         uses: actions/download-artifact@v4
         with:
-          name: webassets
-          path: webassets/
+          name: linux-arm64
+          path: dist/
 
-      - name: Build teleport binary
+      - name: Extract teleport binary
         run: |
-          go build -tags "webassets_embed pam kustomize_no_dynamic_plugin" \
-            -ldflags "-X github.com/gravitational/teleport/lib/modules.teleportBuildType=oss" \
-            -o docker-build/teleport ./tool/teleport
+          mkdir -p docker-build
+          tar -xzf dist/teleport-${VERSION}-linux-arm64-bin.tar.gz -C dist/
+          cp dist/teleport/teleport docker-build/
 
       - name: Login to GHCR
         uses: docker/login-action@v3
