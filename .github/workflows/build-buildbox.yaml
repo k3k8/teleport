@@ -1,0 +1,116 @@
+name: Build Buildbox
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - Dockerfile.buildbox
+      - build.assets/versions.mk
+  workflow_dispatch:
+
+permissions:
+  packages: write
+
+jobs:
+  get-versions:
+    runs-on: ubuntu-latest
+    outputs:
+      golang_version: ${{ steps.v.outputs.golang_version }}
+      rust_version: ${{ steps.v.outputs.rust_version }}
+      node_version: ${{ steps.v.outputs.node_version }}
+      wasm_bindgen_version: ${{ steps.v.outputs.wasm_bindgen_version }}
+      wasm_opt_version: ${{ steps.v.outputs.wasm_opt_version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        run: |
+          echo "golang_version=$(make -s -C build.assets print-go-version | sed 's/^go//')" >> $GITHUB_OUTPUT
+          echo "rust_version=$(make -s -C build.assets print-rust-version)" >> $GITHUB_OUTPUT
+          echo "node_version=$(make -s -C build.assets print-node-version)" >> $GITHUB_OUTPUT
+          echo "wasm_bindgen_version=$(make -s -C build.assets print-wasm-bindgen-version)" >> $GITHUB_OUTPUT
+          echo "wasm_opt_version=$(make -s -C build.assets print-wasm-opt-version)" >> $GITHUB_OUTPUT
+
+  build-amd64:
+    needs: get-versions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push amd64
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.buildbox
+          platforms: linux/amd64
+          push: true
+          build-args: |
+            GOLANG_VERSION=${{ needs.get-versions.outputs.golang_version }}
+            RUST_VERSION=${{ needs.get-versions.outputs.rust_version }}
+            NODE_VERSION=${{ needs.get-versions.outputs.node_version }}
+            WASM_BINDGEN_VERSION=${{ needs.get-versions.outputs.wasm_bindgen_version }}
+            WASM_OPT_VERSION=${{ needs.get-versions.outputs.wasm_opt_version }}
+          tags: ghcr.io/k3k8/teleport-buildbox:latest-amd64
+          cache-from: type=gha,scope=amd64
+          cache-to: type=gha,mode=max,scope=amd64
+
+  build-arm64:
+    needs: get-versions
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push arm64
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.buildbox
+          platforms: linux/arm64
+          push: true
+          build-args: |
+            GOLANG_VERSION=${{ needs.get-versions.outputs.golang_version }}
+            RUST_VERSION=${{ needs.get-versions.outputs.rust_version }}
+            NODE_VERSION=${{ needs.get-versions.outputs.node_version }}
+            WASM_BINDGEN_VERSION=${{ needs.get-versions.outputs.wasm_bindgen_version }}
+            WASM_OPT_VERSION=${{ needs.get-versions.outputs.wasm_opt_version }}
+          tags: ghcr.io/k3k8/teleport-buildbox:latest-arm64
+          cache-from: type=gha,scope=arm64
+          cache-to: type=gha,mode=max,scope=arm64
+
+  push-manifest:
+    needs: [build-amd64, build-arm64]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create and push multi-arch manifest
+        run: |
+          docker buildx imagetools create \
+            -t ghcr.io/k3k8/teleport-buildbox:latest \
+            ghcr.io/k3k8/teleport-buildbox:latest-amd64 \
+            ghcr.io/k3k8/teleport-buildbox:latest-arm64

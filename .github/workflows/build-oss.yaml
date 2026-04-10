@@ -1,0 +1,418 @@
+name: Build OSS Binaries
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'バージョンタグ (例: v17.0.0)'
+        required: true
+
+permissions:
+  contents: write  # Releases へのアップロードに必要
+  pages: write
+  id-token: write
+  packages: write  # ghcr.io へのプッシュに必要
+
+# ─────────────────────────────────────────────
+# バージョン抽出 (全ジョブで共有)
+# ─────────────────────────────────────────────
+jobs:
+  get-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - id: v
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
+          fi
+
+# ─────────────────────────────────────────────
+# Web UI ビルド (buildbox コンテナ内で実行)
+# 全プラットフォームのバイナリが webassets artifact を使い回す
+# ─────────────────────────────────────────────
+  build-ui:
+    needs: get-version
+    runs-on: ubuntu-latest
+    container: ghcr.io/k3k8/teleport-buildbox:latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install JS dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Web UI
+        run: make build-ui
+
+      - name: Upload webassets
+        uses: actions/upload-artifact@v4
+        with:
+          name: webassets
+          path: webassets/
+          retention-days: 1
+
+# ─────────────────────────────────────────────
+# Linux amd64 (buildbox コンテナ)
+# ─────────────────────────────────────────────
+  build-linux-amd64:
+    needs: [get-version, build-ui]
+    runs-on: ubuntu-latest
+    container: ghcr.io/k3k8/teleport-buildbox:latest
+    env:
+      VERSION: ${{ needs.get-version.outputs.version }}
+      GOOS: linux
+      GOARCH: amd64
+      CGO_ENABLED: 1
+      GOFLAGS: -buildvcs=false
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download webassets
+        uses: actions/download-artifact@v4
+        with:
+          name: webassets
+          path: webassets/
+
+      - name: Build binaries
+        run: |
+          LDFLAGS="-X github.com/gravitational/teleport/lib/modules.teleportBuildType=oss"
+
+          go build -tags "webassets_embed pam kustomize_no_dynamic_plugin" \
+            -ldflags "$LDFLAGS" -o build/teleport ./tool/teleport
+          go build -tags "kustomize_no_dynamic_plugin" -ldflags "$LDFLAGS" -o build/tsh ./tool/tsh
+          go build -tags "kustomize_no_dynamic_plugin" -ldflags "$LDFLAGS" -o build/tctl ./tool/tctl
+          go build -tags "kustomize_no_dynamic_plugin" -ldflags "$LDFLAGS" -o build/tbot ./tool/tbot
+          go build -ldflags "$LDFLAGS" -o build/teleport-update ./tool/teleport-update
+
+          cd tool/fdpass-teleport
+          cargo build --release --locked --target x86_64-unknown-linux-gnu
+          cp target/x86_64-unknown-linux-gnu/release/fdpass-teleport ../../build/
+
+      - name: Package tarball
+        run: |
+          TARBALL="teleport-${VERSION}-linux-amd64-bin.tar.gz"
+          mkdir -p dist/teleport pages
+          cp build/teleport build/tsh build/tctl build/tbot build/teleport-update build/fdpass-teleport dist/teleport/
+          echo "${VERSION}" > dist/teleport/VERSION
+          tar czf "pages/${TARBALL}" -C dist teleport/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-amd64
+          path: pages/
+
+# ─────────────────────────────────────────────
+# Linux arm64 (buildbox コンテナ、ネイティブ arm64 ランナー)
+# ─────────────────────────────────────────────
+  build-linux-arm64:
+    needs: [get-version, build-ui]
+    runs-on: ubuntu-24.04-arm
+    container: ghcr.io/k3k8/teleport-buildbox:latest
+    env:
+      VERSION: ${{ needs.get-version.outputs.version }}
+      GOOS: linux
+      GOARCH: arm64
+      CGO_ENABLED: 1
+      GOFLAGS: -buildvcs=false
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download webassets
+        uses: actions/download-artifact@v4
+        with:
+          name: webassets
+          path: webassets/
+
+      - name: Build binaries
+        run: |
+          LDFLAGS="-X github.com/gravitational/teleport/lib/modules.teleportBuildType=oss"
+
+          go build -tags "webassets_embed pam kustomize_no_dynamic_plugin" \
+            -ldflags "$LDFLAGS" -o build/teleport ./tool/teleport
+          go build -tags "kustomize_no_dynamic_plugin" -ldflags "$LDFLAGS" -o build/tsh ./tool/tsh
+          go build -tags "kustomize_no_dynamic_plugin" -ldflags "$LDFLAGS" -o build/tctl ./tool/tctl
+          go build -tags "kustomize_no_dynamic_plugin" -ldflags "$LDFLAGS" -o build/tbot ./tool/tbot
+          go build -ldflags "$LDFLAGS" -o build/teleport-update ./tool/teleport-update
+
+          cd tool/fdpass-teleport
+          cargo build --release --locked --target aarch64-unknown-linux-gnu
+          cp target/aarch64-unknown-linux-gnu/release/fdpass-teleport ../../build/
+
+      - name: Package tarball
+        run: |
+          TARBALL="teleport-${VERSION}-linux-arm64-bin.tar.gz"
+          mkdir -p dist/teleport pages
+          cp build/teleport build/tsh build/tctl build/tbot build/teleport-update build/fdpass-teleport dist/teleport/
+          echo "${VERSION}" > dist/teleport/VERSION
+          tar czf "pages/${TARBALL}" -C dist teleport/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-arm64
+          path: pages/
+
+# ─────────────────────────────────────────────
+# macOS darwin-universal (arm64 + amd64 → lipo)
+# webassets は build-ui の artifact を再利用
+# ─────────────────────────────────────────────
+  build-macos:
+    needs: [get-version, build-ui]
+    runs-on: macos-latest
+    env:
+      VERSION: ${{ needs.get-version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Setup Rust
+        run: |
+          rustup show active-toolchain
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Download webassets
+        uses: actions/download-artifact@v4
+        with:
+          name: webassets
+          path: webassets/
+
+      - name: Build arm64 binaries
+        env:
+          GOOS: darwin
+          GOARCH: arm64
+          CGO_ENABLED: 1
+        run: |
+          LDFLAGS="-X github.com/gravitational/teleport/lib/modules.teleportBuildType=oss"
+
+          go build -tags "webassets_embed kustomize_no_dynamic_plugin" \
+            -ldflags "$LDFLAGS" -o build/arm64/teleport ./tool/teleport
+          go build -tags "kustomize_no_dynamic_plugin" \
+            -ldflags "$LDFLAGS" -o build/arm64/tsh ./tool/tsh
+          go build -tags "kustomize_no_dynamic_plugin" -ldflags "$LDFLAGS" -o build/arm64/tctl ./tool/tctl
+          go build -tags "kustomize_no_dynamic_plugin" -ldflags "$LDFLAGS" -o build/arm64/tbot ./tool/tbot
+
+          cd tool/fdpass-teleport
+          cargo build --release --locked --target aarch64-apple-darwin
+          cp target/aarch64-apple-darwin/release/fdpass-teleport ../../build/arm64/
+
+      - name: Build amd64 binaries (cross-compile)
+        env:
+          GOOS: darwin
+          GOARCH: amd64
+          CGO_ENABLED: 1
+          CC: clang -target x86_64-apple-macos10.15
+        run: |
+          LDFLAGS="-X github.com/gravitational/teleport/lib/modules.teleportBuildType=oss"
+
+          go build -tags "webassets_embed kustomize_no_dynamic_plugin" \
+            -ldflags "$LDFLAGS" -o build/amd64/teleport ./tool/teleport
+          go build -tags "kustomize_no_dynamic_plugin" \
+            -ldflags "$LDFLAGS" -o build/amd64/tsh ./tool/tsh
+          go build -tags "kustomize_no_dynamic_plugin" -ldflags "$LDFLAGS" -o build/amd64/tctl ./tool/tctl
+          go build -tags "kustomize_no_dynamic_plugin" -ldflags "$LDFLAGS" -o build/amd64/tbot ./tool/tbot
+
+          cd tool/fdpass-teleport
+          cargo build --release --locked --target x86_64-apple-darwin
+          cp target/x86_64-apple-darwin/release/fdpass-teleport ../../build/amd64/
+
+      - name: Create universal binaries with lipo
+        run: |
+          mkdir -p build/universal
+          for bin in teleport tsh tctl tbot fdpass-teleport; do
+            lipo -create build/arm64/$bin build/amd64/$bin -output build/universal/$bin
+          done
+
+      - name: Package tarball
+        run: |
+          TARBALL="teleport-${VERSION}-darwin-universal-bin.tar.gz"
+          mkdir -p dist/teleport
+          cp build/universal/* dist/teleport/
+          echo "${VERSION}" > dist/teleport/VERSION
+          cd dist && tar czf "../${TARBALL}" teleport/
+          mkdir -p pages && mv "../${TARBALL}" pages/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: darwin-universal
+          path: pages/
+
+# ─────────────────────────────────────────────
+# Windows amd64 (tsh.exe + tctl.exe + tbot.exe)
+# MinGW は windows-latest に含まれる gcc を使用
+# ─────────────────────────────────────────────
+  build-windows:
+    needs: get-version
+    runs-on: windows-latest
+    env:
+      VERSION: ${{ needs.get-version.outputs.version }}
+      GOOS: windows
+      GOARCH: amd64
+      CGO_ENABLED: 1
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build binaries
+        shell: bash
+        run: |
+          LDFLAGS="-X github.com/gravitational/teleport/lib/modules.teleportBuildType=oss"
+          go build -tags "kustomize_no_dynamic_plugin" -ldflags "$LDFLAGS" -o build/tsh.exe  ./tool/tsh
+          go build -tags "kustomize_no_dynamic_plugin" -ldflags "$LDFLAGS" -o build/tctl.exe ./tool/tctl
+          go build -tags "kustomize_no_dynamic_plugin" -ldflags "$LDFLAGS" -o build/tbot.exe ./tool/tbot
+
+      - name: Package zip
+        shell: bash
+        run: |
+          ZIPNAME="teleport-${VERSION}-windows-amd64.zip"
+          mkdir -p dist/teleport
+          cp build/tsh.exe build/tctl.exe build/tbot.exe dist/teleport/
+          echo "${VERSION}" > dist/teleport/VERSION
+          cd dist && powershell Compress-Archive -Path teleport -DestinationPath "../${ZIPNAME}"
+
+      - name: Upload zip to GitHub Releases
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ZIPNAME="teleport-${VERSION}-windows-amd64.zip"
+          gh release create "${VERSION}" --title "${VERSION}" --notes "" 2>/dev/null || true
+          gh release upload "${VERSION}" "${ZIPNAME}" --clobber
+
+# ─────────────────────────────────────────────
+# GitHub Pages へデプロイ (Linux / macOS CDN 用)
+# ─────────────────────────────────────────────
+  deploy:
+    needs: [build-linux-amd64, build-linux-arm64, build-macos]
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    permissions:
+      pages: write
+      id-token: write
+    steps:
+      - name: Download CDN artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: pages/
+          pattern: "{linux-*,darwin-*}"
+          merge-multiple: true
+
+      - name: Upload to Pages
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: pages/
+
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+# ─────────────────────────────────────────────
+# Docker イメージビルド (Helm chart 用, buildbox コンテナ内)
+# ghcr.io/k3k8/teleport:VERSION として公開
+# ─────────────────────────────────────────────
+  build-docker-amd64:
+    needs: [get-version, build-linux-amd64]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.get-version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download linux-amd64 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-amd64
+          path: dist/
+
+      - name: Extract binaries
+        run: |
+          mkdir -p docker-build
+          tar -xzf dist/teleport-${VERSION}-linux-amd64-bin.tar.gz -C dist/
+          cp dist/teleport/teleport dist/teleport/tctl dist/teleport/tsh dist/teleport/tbot dist/teleport/teleport-update dist/teleport/fdpass-teleport docker-build/
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push amd64 image
+        uses: docker/build-push-action@v6
+        with:
+          context: docker-build/
+          file: Dockerfile.oss
+          platforms: linux/amd64
+          push: true
+          tags: ghcr.io/k3k8/teleport:${{ env.VERSION }}-amd64
+
+  build-docker-arm64:
+    needs: [get-version, build-linux-arm64]
+    runs-on: ubuntu-24.04-arm
+    env:
+      VERSION: ${{ needs.get-version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download linux-arm64 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-arm64
+          path: dist/
+
+      - name: Extract binaries
+        run: |
+          mkdir -p docker-build
+          tar -xzf dist/teleport-${VERSION}-linux-arm64-bin.tar.gz -C dist/
+          cp dist/teleport/teleport dist/teleport/tctl dist/teleport/tsh dist/teleport/tbot dist/teleport/teleport-update dist/teleport/fdpass-teleport docker-build/
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push arm64 image
+        uses: docker/build-push-action@v6
+        with:
+          context: docker-build/
+          file: Dockerfile.oss
+          platforms: linux/arm64
+          push: true
+          tags: ghcr.io/k3k8/teleport:${{ env.VERSION }}-arm64
+
+  push-docker-manifest:
+    needs: [get-version, build-docker-amd64, build-docker-arm64]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.get-version.outputs.version }}
+    steps:
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create and push multi-arch manifest
+        run: |
+          docker buildx imagetools create \
+            -t ghcr.io/k3k8/teleport:${VERSION} \
+            -t ghcr.io/k3k8/teleport:latest \
+            ghcr.io/k3k8/teleport:${VERSION}-amd64 \
+            ghcr.io/k3k8/teleport:${VERSION}-arm64
