@@ -1,0 +1,7 @@
+FROM debian:12-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates dumb-init libpam0g && \
+    rm -rf /var/lib/apt/lists/*
+COPY teleport tctl tsh tbot teleport-update fdpass-teleport /usr/local/bin/
+STOPSIGNAL SIGQUIT
+ENTRYPOINT ["/usr/bin/dumb-init", "teleport", "start", "-c", "/etc/teleport/teleport.yaml"]
