@@ -911,6 +911,8 @@ func NewServer(cfg *InitConfig, opts ...ServerOption) (as *Server, err error) {
 		as.logger.WarnContext(closeCtx, "Auth server starting without cache (may have negative performance implications)")
 	}
 
+	as.oidcAuthService = newOSSoidcService(as)
+
 	return as, nil
 }
 
