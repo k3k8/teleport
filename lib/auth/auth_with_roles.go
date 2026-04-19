@@ -4677,13 +4677,6 @@ func (a *ServerWithRoles) UpsertOIDCConnector(ctx context.Context, connector typ
 	if err := a.authConnectorAction(types.KindOIDC, types.VerbUpdate); err != nil {
 		return nil, trace.Wrap(err)
 	}
-	if !modules.GetModules().Features().GetEntitlement(entitlements.OIDC).Enabled {
-		// TODO(zmb3): ideally we would wrap ErrRequiresEnterprise here, but
-		// we can't currently propagate wrapped errors across the gRPC boundary,
-		// and we want tctl to display a clean user-facing message in this case
-		return nil, trace.AccessDenied("OIDC is only available in Teleport Enterprise")
-	}
-
 	// Support reused MFA for bulk tctl create requests.
 	if err := a.context.AuthorizeAdminActionAllowReusedMFA(); err != nil {
 		return nil, trace.Wrap(err)
@@ -4698,13 +4691,6 @@ func (a *ServerWithRoles) UpdateOIDCConnector(ctx context.Context, connector typ
 	if err := a.authConnectorAction(types.KindOIDC, types.VerbUpdate); err != nil {
 		return nil, trace.Wrap(err)
 	}
-	if !modules.GetModules().Features().GetEntitlement(entitlements.OIDC).Enabled {
-		// TODO(zmb3): ideally we would wrap ErrRequiresEnterprise here, but
-		// we can't currently propagate wrapped errors across the gRPC boundary,
-		// and we want tctl to display a clean user-facing message in this case
-		return nil, trace.AccessDenied("OIDC is only available in Teleport Enterprise")
-	}
-
 	if err := a.context.AuthorizeAdminActionAllowReusedMFA(); err != nil {
 		return nil, trace.Wrap(err)
 	}
@@ -4718,13 +4704,6 @@ func (a *ServerWithRoles) CreateOIDCConnector(ctx context.Context, connector typ
 	if err := a.authConnectorAction(types.KindOIDC, types.VerbCreate); err != nil {
 		return nil, trace.Wrap(err)
 	}
-	if !modules.GetModules().Features().GetEntitlement(entitlements.OIDC).Enabled {
-		// TODO(zmb3): ideally we would wrap ErrRequiresEnterprise here, but
-		// we can't currently propagate wrapped errors across the gRPC boundary,
-		// and we want tctl to display a clean user-facing message in this case
-		return nil, trace.AccessDenied("OIDC is only available in Teleport Enterprise")
-	}
-
 	// Support reused MFA for bulk tctl create requests.
 	if err := a.context.AuthorizeAdminActionAllowReusedMFA(); err != nil {
 		return nil, trace.Wrap(err)
