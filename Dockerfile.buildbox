@@ -23,6 +23,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     g++ \
     pkg-config \
     libpam-dev \
+    # cc-rs uses clang (not gcc) when compiling C deps for wasm32, which the
+    # ironrdp WASM build needs for zstd-sys. llvm provides llvm-ar.
+    clang \
+    llvm \
     && rm -rf /var/lib/apt/lists/*
 
 # Go
