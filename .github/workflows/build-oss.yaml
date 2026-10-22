@@ -106,6 +106,7 @@ jobs:
         with:
           name: linux-amd64
           path: pages/
+          if-no-files-found: error
 
 # ─────────────────────────────────────────────
 # Linux arm64 (buildbox コンテナ、ネイティブ arm64 ランナー)
@@ -156,6 +157,7 @@ jobs:
         with:
           name: linux-arm64
           path: pages/
+          if-no-files-found: error
 
 # ─────────────────────────────────────────────
 # macOS darwin-universal (arm64 + amd64 → lipo)
@@ -234,16 +236,16 @@ jobs:
       - name: Package tarball
         run: |
           TARBALL="teleport-${VERSION}-darwin-universal-bin.tar.gz"
-          mkdir -p dist/teleport
+          mkdir -p dist/teleport pages
           cp build/universal/* dist/teleport/
           echo "${VERSION}" > dist/teleport/VERSION
-          cd dist && tar czf "../${TARBALL}" teleport/
-          mkdir -p pages && mv "../${TARBALL}" pages/
+          tar czf "pages/${TARBALL}" -C dist teleport/
 
       - uses: actions/upload-artifact@v4
         with:
           name: darwin-universal
           path: pages/
+          if-no-files-found: error
 
 # ─────────────────────────────────────────────
 # Windows amd64 (tsh.exe + tctl.exe + tbot.exe)
