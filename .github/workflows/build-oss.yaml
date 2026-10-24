@@ -24,14 +24,20 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.v.outputs.version }}
+      teleport_version: ${{ steps.v.outputs.teleport_version }}
     steps:
       - id: v
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+            VERSION="${{ github.event.inputs.version }}"
           else
-            echo "version=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
+            VERSION="${GITHUB_REF_NAME}"
           fi
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          # バイナリが名乗る版 (v18.11.0-k3k8.3 → 18.11.0)。upstream の公開タグは
+          # api/version.go を上げていないことがあるため、ビルド前にこの版で作り直す
+          TELEPORT_VERSION="${VERSION#v}"
+          echo "teleport_version=${TELEPORT_VERSION%%-k3k8.*}" >> $GITHUB_OUTPUT
 
 # ─────────────────────────────────────────────
 # Web UI ビルド (buildbox コンテナ内で実行)
@@ -66,6 +72,7 @@ jobs:
     container: ghcr.io/k3k8/teleport-buildbox:latest
     env:
       VERSION: ${{ needs.get-version.outputs.version }}
+      TELEPORT_VERSION: ${{ needs.get-version.outputs.teleport_version }}
       GOOS: linux
       GOARCH: amd64
       CGO_ENABLED: 1
@@ -79,9 +86,16 @@ jobs:
           name: webassets
           path: webassets/
 
+      - name: Stamp version
+        shell: bash
+        run: |
+          GOOS= GOARCH= CGO_ENABLED=0 GOWORK=off \
+            go -C build.assets/tooling run ./cmd/apiversion "${TELEPORT_VERSION}" > api/version.go
+          grep '^const Version ' api/version.go
+
       - name: Build binaries
         run: |
-          LDFLAGS="-X github.com/gravitational/teleport/lib/modules.teleportBuildType=oss"
+          LDFLAGS="-X github.com/gravitational/teleport/lib/modules.teleportBuildType=oss -X github.com/gravitational/teleport.Gitref=${VERSION}"
 
           go build -tags "webassets_embed pam kustomize_no_dynamic_plugin" \
             -ldflags "$LDFLAGS" -o build/teleport ./tool/teleport
@@ -117,6 +131,7 @@ jobs:
     container: ghcr.io/k3k8/teleport-buildbox:latest
     env:
       VERSION: ${{ needs.get-version.outputs.version }}
+      TELEPORT_VERSION: ${{ needs.get-version.outputs.teleport_version }}
       GOOS: linux
       GOARCH: arm64
       CGO_ENABLED: 1
@@ -130,9 +145,16 @@ jobs:
           name: webassets
           path: webassets/
 
+      - name: Stamp version
+        shell: bash
+        run: |
+          GOOS= GOARCH= CGO_ENABLED=0 GOWORK=off \
+            go -C build.assets/tooling run ./cmd/apiversion "${TELEPORT_VERSION}" > api/version.go
+          grep '^const Version ' api/version.go
+
       - name: Build binaries
         run: |
-          LDFLAGS="-X github.com/gravitational/teleport/lib/modules.teleportBuildType=oss"
+          LDFLAGS="-X github.com/gravitational/teleport/lib/modules.teleportBuildType=oss -X github.com/gravitational/teleport.Gitref=${VERSION}"
 
           go build -tags "webassets_embed pam kustomize_no_dynamic_plugin" \
             -ldflags "$LDFLAGS" -o build/teleport ./tool/teleport
@@ -168,6 +190,7 @@ jobs:
     runs-on: macos-latest
     env:
       VERSION: ${{ needs.get-version.outputs.version }}
+      TELEPORT_VERSION: ${{ needs.get-version.outputs.teleport_version }}
     steps:
       - uses: actions/checkout@v4
 
@@ -187,13 +210,20 @@ jobs:
           name: webassets
           path: webassets/
 
+      - name: Stamp version
+        shell: bash
+        run: |
+          GOOS= GOARCH= CGO_ENABLED=0 GOWORK=off \
+            go -C build.assets/tooling run ./cmd/apiversion "${TELEPORT_VERSION}" > api/version.go
+          grep '^const Version ' api/version.go
+
       - name: Build arm64 binaries
         env:
           GOOS: darwin
           GOARCH: arm64
           CGO_ENABLED: 1
         run: |
-          LDFLAGS="-X github.com/gravitational/teleport/lib/modules.teleportBuildType=oss"
+          LDFLAGS="-X github.com/gravitational/teleport/lib/modules.teleportBuildType=oss -X github.com/gravitational/teleport.Gitref=${VERSION}"
 
           go build -tags "webassets_embed kustomize_no_dynamic_plugin" \
             -ldflags "$LDFLAGS" -o build/arm64/teleport ./tool/teleport
@@ -213,7 +243,7 @@ jobs:
           CGO_ENABLED: 1
           CC: clang -target x86_64-apple-macos10.15
         run: |
-          LDFLAGS="-X github.com/gravitational/teleport/lib/modules.teleportBuildType=oss"
+          LDFLAGS="-X github.com/gravitational/teleport/lib/modules.teleportBuildType=oss -X github.com/gravitational/teleport.Gitref=${VERSION}"
 
           go build -tags "webassets_embed kustomize_no_dynamic_plugin" \
             -ldflags "$LDFLAGS" -o build/amd64/teleport ./tool/teleport
@@ -256,6 +286,7 @@ jobs:
     runs-on: windows-latest
     env:
       VERSION: ${{ needs.get-version.outputs.version }}
+      TELEPORT_VERSION: ${{ needs.get-version.outputs.teleport_version }}
       GOOS: windows
       GOARCH: amd64
       CGO_ENABLED: 1
@@ -267,10 +298,17 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Stamp version
+        shell: bash
+        run: |
+          GOOS= GOARCH= CGO_ENABLED=0 GOWORK=off \
+            go -C build.assets/tooling run ./cmd/apiversion "${TELEPORT_VERSION}" > api/version.go
+          grep '^const Version ' api/version.go
+
       - name: Build binaries
         shell: bash
         run: |
-          LDFLAGS="-X github.com/gravitational/teleport/lib/modules.teleportBuildType=oss"
+          LDFLAGS="-X github.com/gravitational/teleport/lib/modules.teleportBuildType=oss -X github.com/gravitational/teleport.Gitref=${VERSION}"
           go build -tags "kustomize_no_dynamic_plugin" -ldflags "$LDFLAGS" -o build/tsh.exe  ./tool/tsh
           go build -tags "kustomize_no_dynamic_plugin" -ldflags "$LDFLAGS" -o build/tctl.exe ./tool/tctl
           go build -tags "kustomize_no_dynamic_plugin" -ldflags "$LDFLAGS" -o build/tbot.exe ./tool/tbot
